@@ -1,0 +1,19 @@
+LIBRARY d3d
+EXPORTS
+    D3D_Init
+    D3D_SetSource
+    D3D_SetRenderSize
+    D3D_Shutdown
+    D3D_GetCaptureWidth
+    D3D_GetCaptureHeight
+    D3D_GetCaptureImageByteCount
+    D3D_GetDevicePtr
+    D3D_GetContextPtr
+    D3D_GetTexturePtr
+    D3D_CaptureToTexture
+    D3D_CaptureToImageBytes
+    D3D_RenderToWindow
+    D3D_RenderBlackToWindow
+    D3D_GetEncoderInfo
+    D3D_GetLastError
+    D3D_ReleaseLastFrame
