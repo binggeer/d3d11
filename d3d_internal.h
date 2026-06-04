@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
@@ -14,7 +15,6 @@
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 
-#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -43,9 +43,6 @@ struct WindowRenderContext {
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps;
-    ComPtr<ID3D11InputLayout> layout;
-    ComPtr<ID3D11Buffer> vb;
-    ComPtr<ID3D11BlendState> blend;
     ComPtr<ID3D11RasterizerState> raster;
     bool gpuOk = false;
 };
@@ -79,8 +76,6 @@ private:
     Engine() = default;
 
     mutable std::mutex mtx_;
-    bool coInitByDll_ = false;
-    bool roInitByDll_ = false;
     bool mfStarted_ = false;
     bool captureReady_ = false;
     bool renderOnly_ = false;

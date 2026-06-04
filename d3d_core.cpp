@@ -133,6 +133,34 @@ const char* VendorEncoderLabel(int vendorClass) {
     }
 }
 
+bool WgcBorderToggleSupported() {
+    try {
+        return winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
+            L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired");
+    } catch (...) {
+        return false;
+    }
+}
+
+void TryDisableWgcCaptureBorder(winrt::Windows::Graphics::Capture::GraphicsCaptureSession& session) {
+    if (!WgcBorderToggleSupported())
+        return;
+    try {
+        if (winrt::Windows::Foundation::Metadata::ApiInformation::IsMethodPresent(
+                L"Windows.Graphics.Capture.GraphicsCaptureAccess", L"RequestAccessAsync")) {
+            try {
+                winrt::Windows::Graphics::Capture::GraphicsCaptureAccess::RequestAccessAsync(
+                    winrt::Windows::Graphics::Capture::GraphicsCaptureAccessKind::Borderless)
+                    .get();
+            } catch (...) {
+            }
+        }
+        // Set even if RequestAccess denied; honored when system policy allows (Win32CaptureSample).
+        session.IsBorderRequired(false);
+    } catch (...) {
+    }
+}
+
 bool EnumHardwareEncoders(IMFActivate*** outActs, UINT32* outCount) {
     *outActs = nullptr;
     *outCount = 0;
@@ -385,6 +413,12 @@ void Engine::ApplyCropFromSource(int fullW, int fullH) {
 }
 
 void Engine::ReleaseCaptureSession() {
+    if (capSession_) {
+        try {
+            capSession_.Close();
+        } catch (...) {
+        }
+    }
     capSession_ = nullptr;
     framePool_ = nullptr;
     capItem_ = nullptr;
@@ -488,6 +522,7 @@ int Engine::SetupWgcCapture() {
             winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
             2, poolSize_);
         capSession_ = framePool_.CreateCaptureSession(capItem_);
+        TryDisableWgcCaptureBorder(capSession_);
         try {
             capSession_.IsCursorCaptureEnabled(false);
         } catch (...) {
@@ -586,17 +621,19 @@ int Engine::RebuildCaptureSession() {
             return kErrDevice;
     }
 
+    // Desktop (hwnd 0): DXGI duplication first (no yellow border), WGC fallback.
+    if (sourceHwnd_ == nullptr) {
+        int r = SetupDuplicationCapture();
+        if (r == 0)
+            return 0;
+        if (IsWgcSupported())
+            return SetupWgcCapture();
+        return r;
+    }
+
     int r = kErrCapture;
     if (IsWgcSupported())
         r = SetupWgcCapture();
-    if (r == 0)
-        return 0;
-
-    if (sourceHwnd_ == nullptr) {
-        r = SetupDuplicationCapture();
-        if (r == 0)
-            return 0;
-    }
     return r;
 }
 
@@ -1112,16 +1149,14 @@ int Engine::SetRenderSize(int frameW, int frameH) {
             return kErrDevice;
     }
 
-    ReleaseCaptureSession();
-    ReleaseDuplication();
-    captureReady_ = false;
+    DestroyAllRenderers();
+    ResetCaptureUnlocked();
+    sourceHwnd_ = nullptr;
+    crop_ = {};
     renderOnly_ = true;
     captureW_ = frameW;
     captureH_ = frameH;
     frameBytes_ = bytes;
-    captureTex_.Reset();
-    stagingTex_.Reset();
-    cpuFrame_.clear();
     SetError("OK");
     return 0;
 }
@@ -1138,34 +1173,28 @@ void Engine::ShutdownForDllDetach() {
     captureW_ = captureH_ = frameBytes_ = 0;
     sourceHwnd_ = nullptr;
     crop_ = {};
+    encoderInfo_ = "CPU";
     if (mfStarted_) {
         MFShutdown();
         mfStarted_ = false;
     }
+    lastError_ = "OK";
 }
 
 void Engine::Shutdown() {
     std::lock_guard lock(mtx_);
-    EnsureThreadCom();
     ResetCaptureUnlocked();
     DestroyAllRenderers();
-    cpuFrame_.shrink_to_fit();
+    cpuFrame_.clear();
     context_.Reset();
     device_.Reset();
     captureW_ = captureH_ = frameBytes_ = 0;
     sourceHwnd_ = nullptr;
     crop_ = {};
+    encoderInfo_ = "CPU";
     if (mfStarted_) {
         MFShutdown();
         mfStarted_ = false;
-    }
-    if (roInitByDll_) {
-        RoUninitialize();
-        roInitByDll_ = false;
-    }
-    if (coInitByDll_) {
-        CoUninitialize();
-        coInitByDll_ = false;
     }
     SetError("OK");
 }
@@ -1182,7 +1211,9 @@ int Engine::GetCaptureHeight() const {
 
 int Engine::GetCaptureImageByteCount() const {
     std::lock_guard lock(mtx_);
-    if (captureW_ <= 0 || captureH_ <= 0)
+    if (!captureReady_ && !renderOnly_)
+        return 0;
+    if (captureW_ <= 0 || captureH_ <= 0 || frameBytes_ <= 0)
         return 0;
     return frameBytes_;
 }
