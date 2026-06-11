@@ -242,6 +242,14 @@ Engine& Engine::Instance() {
     return inst;
 }
 
+Engine::Engine() {
+    InitializeCriticalSection(&mtx_);
+}
+
+Engine::~Engine() {
+    DeleteCriticalSection(&mtx_);
+}
+
 HWND Engine::NormalizeSourceHwnd(HWND hwnd) {
     if (hwnd == nullptr)
         return nullptr;
@@ -255,14 +263,21 @@ void Engine::EnsureThreadCom() {
     if (tlsReady)
         return;
 
-    const HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (coHr != S_OK && coHr != S_FALSE && coHr != RPC_E_CHANGED_MODE) {
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // C++/WinRT requires init_apartment; raw CoInitializeEx/RoInitialize can AV on WGC calls.
+    try {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    } catch (...) {
+        try {
+            winrt::init_apartment(winrt::apartment_type::single_threaded);
+        } catch (...) {
+            const HRESULT coHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            if (coHr != S_OK && coHr != S_FALSE && coHr != RPC_E_CHANGED_MODE)
+                CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            const HRESULT roHr = RoInitialize(RO_INIT_MULTITHREADED);
+            if (FAILED(roHr) && roHr != RO_E_ALREADYINITIALIZED)
+                RoInitialize(RO_INIT_SINGLETHREADED);
+        }
     }
-
-    const HRESULT roHr = RoInitialize(RO_INIT_MULTITHREADED);
-    if (FAILED(roHr) && roHr != RO_E_ALREADYINITIALIZED)
-        RoInitialize(RO_INIT_SINGLETHREADED);
 
     tlsReady = true;
 }
@@ -303,7 +318,7 @@ bool Engine::TryCreateWinRtDevice(
 }
 
 void Engine::SetLastErrorMessage(const std::string& msg) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     lastError_ = msg;
 }
 
@@ -1072,7 +1087,7 @@ void Engine::ResetCaptureUnlocked() {
 }
 
 int Engine::Init(HWND sourceHwnd, int hwProbe, const CropRect& crop) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     EnsureMfStarted();
     ResetCaptureUnlocked();
@@ -1106,7 +1121,7 @@ int Engine::Init(HWND sourceHwnd, int hwProbe, const CropRect& crop) {
 }
 
 int Engine::SetSource(HWND sourceHwnd, const CropRect& crop) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (!captureReady_ && !renderOnly_) {
         SetError("not initialized");
@@ -1132,7 +1147,7 @@ int Engine::SetSource(HWND sourceHwnd, const CropRect& crop) {
 }
 
 int Engine::SetRenderSize(int frameW, int frameH) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (frameW <= 0 || frameH <= 0) {
         SetError("invalid size");
@@ -1162,9 +1177,12 @@ int Engine::SetRenderSize(int frameW, int frameH) {
 }
 
 void Engine::ShutdownForDllDetach() {
-    std::unique_lock lock(mtx_, std::try_to_lock);
-    if (!lock.owns_lock())
+    if (!TryEnterCriticalSection(&mtx_))
         return;
+    struct Leave {
+        CRITICAL_SECTION& cs;
+        ~Leave() { LeaveCriticalSection(&cs); }
+    } leave{ mtx_ };
     ResetCaptureUnlocked();
     DestroyAllRenderers();
     cpuFrame_.clear();
@@ -1182,7 +1200,7 @@ void Engine::ShutdownForDllDetach() {
 }
 
 void Engine::Shutdown() {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     ResetCaptureUnlocked();
     DestroyAllRenderers();
     cpuFrame_.clear();
@@ -1200,17 +1218,17 @@ void Engine::Shutdown() {
 }
 
 int Engine::GetCaptureWidth() const {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return captureW_;
 }
 
 int Engine::GetCaptureHeight() const {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return captureH_;
 }
 
 int Engine::GetCaptureImageByteCount() const {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     if (!captureReady_ && !renderOnly_)
         return 0;
     if (captureW_ <= 0 || captureH_ <= 0 || frameBytes_ <= 0)
@@ -1219,22 +1237,22 @@ int Engine::GetCaptureImageByteCount() const {
 }
 
 int Engine::GetDevicePtr() const {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return reinterpret_cast<int>(device_.Get());
 }
 
 int Engine::GetContextPtr() const {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return reinterpret_cast<int>(context_.Get());
 }
 
 int Engine::GetTexturePtr() const {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return reinterpret_cast<int>(captureTex_.Get());
 }
 
 int Engine::CaptureToTexture() {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (!captureReady_) {
         SetError("not initialized");
@@ -1254,7 +1272,7 @@ int Engine::CaptureToTexture() {
 }
 
 int Engine::CaptureToImageBytes(void* buffer, int bufferLen) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (!buffer || bufferLen <= 0) {
         SetError("invalid buffer");
@@ -1289,7 +1307,7 @@ int Engine::CaptureToImageBytes(void* buffer, int bufferLen) {
 }
 
 int Engine::RenderToWindow(HWND hwnd, const void* frameData, int frameLen) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (!hwnd || !IsWindow(hwnd)) {
         SetError("invalid hwnd");
@@ -1355,7 +1373,7 @@ int Engine::RenderToWindow(HWND hwnd, const void* frameData, int frameLen) {
 }
 
 int Engine::RenderBlackToWindow(HWND hwnd) {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (!hwnd || !IsWindow(hwnd)) {
         SetError("invalid hwnd");
@@ -1395,7 +1413,7 @@ int Engine::RenderBlackToWindow(HWND hwnd) {
 }
 
 int Engine::ReleaseLastFrame() {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     EnsureThreadCom();
     if (!captureReady_ && !renderOnly_) {
         SetError("not initialized");
@@ -1420,12 +1438,12 @@ int Engine::ReleaseLastFrame() {
 }
 
 const char* Engine::GetEncoderInfo() {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return ThreadLocalString(encoderInfo_);
 }
 
 const char* Engine::GetLastError() {
-    std::lock_guard lock(mtx_);
+    EngineLock lock(mtx_);
     return ThreadLocalString(lastError_);
 }
 

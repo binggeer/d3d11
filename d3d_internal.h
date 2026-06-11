@@ -16,7 +16,6 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +23,16 @@
 namespace d3d {
 
 using Microsoft::WRL::ComPtr;
+
+struct EngineLock {
+    explicit EngineLock(CRITICAL_SECTION& cs) noexcept : cs_(cs) { EnterCriticalSection(&cs_); }
+    ~EngineLock() { LeaveCriticalSection(&cs_); }
+    EngineLock(const EngineLock&) = delete;
+    EngineLock& operator=(const EngineLock&) = delete;
+
+private:
+    CRITICAL_SECTION& cs_;
+};
 
 struct CropRect {
     int x = 0;
@@ -73,9 +82,10 @@ public:
     void SetLastErrorMessage(const std::string& msg);
 
 private:
-    Engine() = default;
+    Engine();
+    ~Engine();
 
-    mutable std::mutex mtx_;
+    mutable CRITICAL_SECTION mtx_{};
     bool mfStarted_ = false;
     bool captureReady_ = false;
     bool renderOnly_ = false;
